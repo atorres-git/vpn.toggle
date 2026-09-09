@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "vpn.toggle",
+  "name": "VPN Toggle",
+  "version": "1.0.0",
+  "author": "atorres-git",
+  "description": "VPN connection toggle for NetworkManager L2TP connections",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "VPN",
+    "description": "Toggle VPN connection on/off",
+    "category": "Network",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
