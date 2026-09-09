@@ -19,6 +19,7 @@ Panel {
   property bool editing: false
   property int deleteArmedIndex: -1
   property int pendingDeleteIndex: -1
+  property string deleteError: ""
   property var pendingConnection: null
 
   onSettingsChanged: connectionsModel = root.readConnections()
@@ -78,11 +79,27 @@ Panel {
   function readConnections() {
     var out = []
     var raw = settings ? settings.connections : null
-    if (raw && typeof raw === "object" && typeof raw.length === "number" && raw.length >= 0) {
-      for (var i = 0; i < raw.length; i++) {
-        var clean = root.sanitizeConnection(raw[i])
-        if (clean) out.push(clean)
+    var list = null
+    if (raw && typeof raw === "object") {
+      if (typeof raw.length === "number" && raw.length >= 0) {
+        list = raw
+      } else if (raw.items && typeof raw.items === "object"
+          && typeof raw.items.length === "number" && raw.items.length >= 0) {
+        list = raw.items
       }
+    }
+    if (list) {
+      for (var i = 0; i < list.length; i++) {
+        var clean = root.sanitizeConnection(list[i])
+        if (clean && String(clean.name || "") !== "") out.push(clean)
+      }
+      return out
+    }
+    // Tolerate a lone object (e.g. hand-written config) the same as a
+    // single-entry list.
+    if (raw && typeof raw === "object") {
+      var single = root.sanitizeConnection(raw)
+      if (single && String(single.name || "") !== "") out.push(single)
       return out
     }
     if (settings && settings.vpnName) {
@@ -200,41 +217,35 @@ Panel {
     root.configureStatus = ""
   }
 
-  function persistConnections(list) {
-    var shell = root.bar ? root.bar.shell : null
-    if (!shell || typeof shell.mutateShellConfig !== "function") return false
+  // Persist-then-apply state for the async settings write below.
+  property var pendingPersistList: []
+  property string pendingPersistAction: ""
+  property string persistError: ""
 
-    var widgetId = root.moduleName !== "" ? root.moduleName : "vpn.toggle"
-    shell.mutateShellConfig(function(config) {
-      var layout = config && config.bar ? config.bar.layout : null
-      if (!layout) return
-      var regions = ["left", "center", "right"]
-      for (var r = 0; r < regions.length; r++) {
-        var entries = layout[regions[r]]
-        if (!Array.isArray(entries)) continue
-        for (var i = 0; i < entries.length; i++) {
-          var entry = entries[i]
-          var entryId = typeof entry === "string" ? entry : (entry ? entry.id : "")
-          if (String(entryId) !== widgetId) continue
-          if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
-            entry = { id: widgetId }
-            entries[i] = entry
-          }
-          delete entry.vpnName
-          delete entry.serverIp
-          delete entry.username
-          delete entry.password
-          delete entry.psk
-          var clean = []
-          for (var j = 0; j < list.length; j++) {
-            var c = root.sanitizeConnection(list[j])
-            if (c) clean.push(c)
-          }
-          entry.connections = clean
-        }
-      }
-    })
-    return true
+  function widgetId() {
+    return root.moduleName !== "" ? root.moduleName : "vpn.toggle"
+  }
+
+  // Widget settings are read-only from QML: there is no shell.mutateShellConfig
+  // API. The supported write path is the shell CLI, which updates the live
+  // shell and persists to shell.json, so onSettingsChanged fires and the list
+  // refreshes on its own.
+  // The list travels wrapped as {"items": [...]}: the qs IPC layer splats a
+  // top-level JSON array into separate arguments ([] vanishes, [a,b] becomes
+  // two args), so a bare array can never survive the trip. The wrapper object
+  // passes through untouched for 0, 1, or N entries.
+  function persistConnections(list, action) {
+    var clean = []
+    for (var j = 0; j < list.length; j++) {
+      var c = root.sanitizeConnection(list[j])
+      if (c) clean.push(c)
+    }
+    root.pendingPersistList = clean
+    root.pendingPersistAction = String(action || "")
+    root.persistError = ""
+    root.configureStatus = "Saving settings…"
+    persistProc.command = ["omarchy", "bar", "set", root.widgetId(), "connections", JSON.stringify({ "items": clean }), "--json"]
+    persistProc.running = true
   }
 
   function collectConnection() {
@@ -287,15 +298,9 @@ Panel {
     } else {
       list.push(collected)
     }
-    root.persistConnections(list)
-    statusPoll.restart()
-    root.editing = false
-    root.editingIndex = -1
     root.pendingConnection = null
     root.pendingSecrets = ""
-    root.deleteArmedIndex = -1
-    root.configureStatus = "Saved"
-    root.open()
+    root.persistConnections(list, "save")
   }
 
   function saveAll() {
@@ -346,6 +351,49 @@ Panel {
     }
     stderr: StdioCollector {
       waitForEnd: true
+    }
+  }
+
+  // Persists the connection list through the shell CLI instead of editing
+  // shell.json directly, so the running shell picks the change up live.
+  Process {
+    id: persistProc
+    command: ["omarchy", "bar", "set", "vpn.toggle", "connections", "{\"items\":[]}", "--json"]
+    stdout: StdioCollector {
+      waitForEnd: true
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.persistError = String(text).trim()
+    }
+    onExited: function(exitCode) {
+      var action = root.pendingPersistAction
+      var list = JSON.parse(JSON.stringify(root.pendingPersistList || []))
+      root.pendingPersistAction = ""
+      if (exitCode === 0) {
+        root.connectionsModel = list
+        if (action === "save") {
+          statusPoll.restart()
+          root.editing = false
+          root.editingIndex = -1
+          root.deleteArmedIndex = -1
+          root.configureStatus = "Saved"
+          root.open()
+        } else if (action === "delete") {
+          root.pendingDeleteIndex = -1
+          root.configureStatus = ""
+          statusPoll.restart()
+          if (root.connectionsModel.length === 0) {
+            root.editing = false
+            root.editingIndex = -1
+            root.clearFields()
+          }
+        }
+      } else {
+        var detail = root.persistError !== "" ? root.persistError : "exit " + exitCode
+        root.configureStatus = "Error: settings not saved (" + detail + ")"
+        root.persistError = ""
+      }
     }
   }
 
@@ -421,6 +469,7 @@ Panel {
     stderr: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        root.deleteError = String(text).trim()
         var message = String(text).trim()
         if (message) root.configureStatus = "Delete error: " + message
       }
@@ -431,19 +480,21 @@ Panel {
         var index = root.pendingDeleteIndex
         var list = JSON.parse(JSON.stringify(root.connectionsModel || []))
         if (index >= 0 && index < list.length) list.splice(index, 1)
-        root.persistConnections(list)
-        root.pendingDeleteIndex = -1
-        root.configureStatus = ""
-        statusPoll.restart()
-        if (root.connectionsModel.length === 0) {
-          root.editing = false
-          root.editingIndex = -1
-          root.clearFields()
-        }
+        root.configureStatus = "Deleting connection…"
+        root.persistConnections(list, "delete")
+      } else if (root.deleteError.indexOf("nknown connection") >= 0 && root.pendingDeleteIndex >= 0) {
+        // NetworkManager doesn't know this entry (e.g. wrong case): drop it
+        // from the list anyway so it can't get stuck.
+        var idx = root.pendingDeleteIndex
+        var kept = JSON.parse(JSON.stringify(root.connectionsModel || []))
+        if (idx >= 0 && idx < kept.length) kept.splice(idx, 1)
+        root.configureStatus = "Not found in NetworkManager — removed from list"
+        root.persistConnections(kept, "delete")
       } else {
         var current = String(root.configureStatus)
         if (current.indexOf("Delete") !== 0) root.configureStatus = "Delete failed (exit " + exitCode + ")"
       }
+      root.deleteError = ""
     }
   }
 
@@ -678,6 +729,7 @@ Panel {
                   onClicked: {
                     if (root.deleteArmedIndex === index) {
                       root.pendingDeleteIndex = index
+                      root.deleteError = ""
                       deleteProc.command = ["nmcli", "connection", "delete", String(conn.name || "").trim()]
                       root.deleteArmedIndex = -1
                       root.configureStatus = "Deleting connection…"
@@ -690,6 +742,18 @@ Panel {
               }
             }
           }
+        }
+
+        Text {
+          visible: root.hasAnyConnection && !root.editing && root.configureStatus !== ""
+          textFormat: Text.PlainText
+          text: root.configureStatus
+          color: root.configureError ? root.bar.urgent : Qt.darker(root.bar.foreground, 1.4)
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
+          font.bold: true
+          width: parent.width
+          wrapMode: Text.WordWrap
         }
 
         Text {
