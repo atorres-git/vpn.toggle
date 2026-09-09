@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "vpn.toggle",
   "name": "VPN Toggle",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "atorres-git",
   "description": "VPN connection toggle for NetworkManager L2TP connections",
   "kinds": [

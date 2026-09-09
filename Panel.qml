@@ -15,6 +15,7 @@ Panel {
   readonly property bool hasAnyConnection: connectionsModel.length > 0
   property string statusText: ""
   property string configureStatus: ""
+  property string ipsecWarning: ""
   property int editingIndex: -1
   property bool editing: false
   property int deleteArmedIndex: -1
@@ -63,6 +64,25 @@ Panel {
       waitForEnd: true
       onStreamFinished: root.updateStatus(text)
     }
+  }
+
+  Process {
+    id: ipsecProbe
+    command: ["ipsec", "version"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.checkIpsec(text)
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.checkIpsec(text)
+    }
+    onExited: function(exitCode) {
+      if (exitCode !== 0 && root.ipsecWarning === "") {
+        root.ipsecWarning = "strongSwan/ipsec not found — L2TP/IPsec requires it. See README."
+      }
+    }
+    Component.onCompleted: running = true
   }
 
   // Secrets are never part of the persisted connection list. They live only in
@@ -126,6 +146,22 @@ Panel {
     }
     root.activeNames = active
     root.statusText = root.anyConnected ? "Connected" : "Disconnected"
+  }
+
+  // strongSwan 6.1+ disabled IKEv1 at build time; NetworkManager-L2TP needs
+  // it, so detect a known-broken build and warn instead of failing silently.
+  function checkIpsec(text) {
+    if (root.ipsecWarning !== "") return
+    var raw = String(text || "")
+    var m = raw.match(/U(\d+)\.(\d+)\.(\d+)/)
+    if (m) {
+      var major = parseInt(m[1], 10)
+      var minor = parseInt(m[2], 10)
+      if (major === 6 && minor >= 1) {
+        root.ipsecWarning = "strongSwan " + major + "." + minor + "+ dropped IKEv1, which L2TP/IPsec needs. "
+          + "Use strongSwan 6.0.x or a build with --enable-ikev1 (Arch: pin it via IgnorePkg). See README."
+      }
+    }
   }
 
   function toggleConnection(index) {
@@ -551,6 +587,19 @@ Panel {
         id: column
         anchors.fill: parent
         spacing: Style.space(14)
+
+        // strongSwan 6.1+ dropped IKEv1 (breaks NetworkManager-L2TP)
+        Text {
+          visible: root.ipsecWarning !== ""
+          textFormat: Text.PlainText
+          text: root.ipsecWarning
+          color: root.bar.urgent
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
+          font.bold: true
+          width: parent.width
+          wrapMode: Text.WordWrap
+        }
 
         // Hero: VPN icon + status
         Item {

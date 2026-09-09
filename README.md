@@ -9,6 +9,37 @@ you manage multiple NetworkManager L2TP VPN connections from its panel. Toggle
 connections from the list, add new ones from the form, and disconnect or
 connect everything with the hero button (or press `V`).
 
+## Prerequisites
+
+The widget drives NetworkManager **L2TP/IPsec** connections, so the desktop
+needs NetworkManager's L2TP plugin and an IKEv1-capable strongSwan:
+
+```sh
+# Arch
+sudo pacman -S networkmanager-l2tp networkmanager-vpn-plugin-l2tp strongswan xl2tpd
+```
+
+### Known issue: strongSwan 6.1+ (IKEv1 removed)
+
+strongSwan **6.1** ships with **IKEv1 disabled by default**. That is a build-time
+change — there is **no runtime option** to re-enable it. NetworkManager's L2TP
+plugin negotiates over IKEv1, so with a stock strongSwan 6.1 the connection
+always fails with *"Could not establish IPsec connection"* — even with correct
+credentials — and charon logs *"IKE version 1 not supported"*.
+
+Fix: use strongSwan **6.0.x**, or a 6.1+ build compiled with `--enable-ikev1`.
+
+On Arch, downgrade from the pacman cache and pin the package so updates don't
+silently re-break the VPN:
+
+```sh
+sudo pacman -U /var/cache/pacman/pkg/strongswan-6.0.7-1-x86_64.pkg.tar.zst
+echo "IgnorePkg = strongswan" | sudo tee -a /etc/pacman.conf
+```
+
+The widget detects strongSwan 6.1+ at startup and shows a warning at the top of
+its panel instead of failing silently.
+
 ## Installation on a new PC
 
 1. Install the plugin from the marketplace or git:
